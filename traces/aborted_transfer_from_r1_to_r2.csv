@@ -1,0 +1,10 @@
+Write,,1,0
+Write,,2,0
+Read,1,1,0
+Read,1,2,0
+Write,,1,50
+Write,1,1,-100
+Write,1,2,100
+Commit,1,,False
+Read,,1,50
+Read,,2,0

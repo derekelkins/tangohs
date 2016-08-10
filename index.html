@@ -1,0 +1,456 @@
+<html>
+<head>
+    <meta charset="UTF-8"/>
+    <title>Tango Visualization</title>
+    <script type="text/javascript">var haskell = { advance: function () {}, parseSteps: function () {} };function onData() {}</script>
+    <script type="text/javascript" src="https://d3js.org/d3.v4.min.js"></script>
+    <script type="text/javascript" src="dist/build/tangofp/tangofp.jsexe/all.js"></script>
+    <style type="text/css">
+        body {
+            font-family: sans-serif;
+        }
+
+        rect.register {
+            fill: #fff;
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        .logEntry rect.update {
+            fill: none;
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        .logEntry.from-transaction-1 rect.update, .logEntry.from-transaction-1 rect.commit {
+            fill: #aaf;
+        }
+
+        .logEntry.from-transaction-2 rect.update, .logEntry.from-transaction-2 rect.commit {
+            fill: #daf;
+        }
+
+        .logEntry.from-transaction-3 rect.update, .logEntry.from-transaction-3 rect.commit {
+            fill: #fca;
+        }
+
+        .logEntry rect.commit {
+            fill: none;
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        .steps-graphic rect {
+            fill: none;
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        .transaction line {
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        line.commit-line.committed {
+            stroke: #0f0;
+            stroke-width: 5px;
+        }
+        line.commit-line.aborted {
+            stroke: #f00;
+            stroke-width: 5px;
+        }
+        line.commit-line.undecided {
+            display: none;
+        }
+
+        #editor {
+            width: 1000px;
+            display: none;
+            position: fixed;
+            height: 1000px;
+        }
+    </style>
+</head>
+<body>
+    <span id="title-text"></span>
+    <div id="container">
+    </div>
+    <div id="editor">
+        <textarea id="editor-text" style="width: 100%;" rows=40></textarea>
+    </div>
+<script type="text/javascript">
+// { entry: {...}, registerFile: { 'null': { 'r1': 1, 'r2': 2 }, '1': { 'r1': 3 } }, readSets: { '1': [{ register: 1, position: 0 }] } }
+// entry = { type: 'update', speculative: true, checkpoint: true, oid: 3, value: 123 }
+//       | { type: 'commit', readSet: [1,4,6], writeSet: [2,3] }
+
+var numRegisters = 4, numTransactions = 2;
+var regWidth = 70, regHeight = 30;
+var logWidth = 100;
+var transactionWidth = numRegisters*regWidth + 10;
+var entryWidth = 100, entryHeight = 85;
+var logLeft = numRegisters*regWidth + 10;
+var transactionLeft = logLeft + logWidth + 20;
+var stepsWidth = transactionWidth;
+var stepsLeft = transactionLeft + numTransactions*transactionWidth;
+var width = stepsLeft + stepsWidth, height = 1000;
+
+var transactionColors = {
+    '1': 'blue',
+    '2': 'purple',
+    '3': 'orange'
+};
+
+var svg = d3.select('#container').append('svg')
+    .attr('width', width)
+    .attr('height', height);
+
+var logGraphic = svg.append('g')
+    .attr('class', 'log-graphic')
+    .attr('transform', 'translate(10, 10)');
+
+var transactionsGraphic = svg.append('g')
+    .attr('class', 'transactions-graphic')
+    .attr('transform', 'translate('+transactionLeft+', 10)');
+
+var stepsGraphic = svg.append('g')
+    .attr('class', 'steps-graphic')
+    .attr('transform', 'translate('+stepsLeft+', 10)');
+stepsGraphic.append('rect');
+
+// See bl.ocks.org/d3noob/5141278
+svg.append('svg:defs').selectAll('marker')
+    .data(['end-1', 'end-2', 'end-3'])
+  .enter().append('svg:marker')
+    .attr('id', function(d) { return d; })
+    .attr('style', function(_, ix) { return 'stroke: ' + transactionColors[ix+1] + '; fill: ' + transactionColors[ix+1] + ';'; })
+    .attr('viewBox', '0 0 10 10')
+    .attr('refX', 1)
+    .attr('refY', 5)
+    .attr('markerWidth', 6)
+    .attr('markerHeight', 6)
+    .attr('orient', 'auto')
+  .append('svg:path')
+    .attr('d', 'M0,0 L10,5 L0,10 z');
+
+function renderState(state) {
+    var registerFile = state.registerFile;
+
+    renderLog(log);
+    renderTransactions(transactions);
+}
+
+function resetState() {
+    renderLog([]);
+    renderTransactions({});
+}
+
+// registers = [{name: 'r1', value: 1}, {name: 'r2', value: 2}] assumed sorted on name. That doesn't matter
+// to this function, but it will be nicer if that is the case.  This function could sort the input if this is
+// the best place to do it.
+function renderRegisters(svg, tr) {
+    var selection = svg.selectAll('rect.register').data(function(e) { 
+        return e.registers; });
+
+    selection   // UPDATE
+      .select('text')
+        .text(function(d) { return d.name + ': ' + d.value; });
+
+    selection.exit().remove(); // EXIT
+
+    var t = tr.transition().duration(500);
+
+    var enter = selection.enter();
+    enter.append('rect') // ENTER
+        .attr('class', 'register')
+        .attr('height', regHeight)
+        .attr('width', regWidth)
+        .attr('x', 0)
+      .transition(t)
+        .attr('x', function(d, i) { return i*regWidth; });
+
+    enter.append('text')
+        .text(function(d) { return d.name + ': ' + d.value; })
+        .attr('y', regHeight - 10) // TODO: Make a cleaner solution than this.
+        .attr('x', 5)
+      .transition(t)
+        .attr('x', function(d, i) { return i*regWidth + 5; });
+}
+
+function logEntryLabel(entry) {
+    if(entry.type === 'update') {
+        return ['r' + entry.oid + ' := ' + entry.value];
+    } else if(entry.type === 'commit') {
+        return ['Read Set:', entry.readSet, 'Write Set:', entry.writeSet]; // TODO
+    } else {  
+        return [entry.type];
+    }
+}
+
+// log = [{registers: [...], entry: {...} }, ...]
+function renderLog(log) {
+    var selection = logGraphic.selectAll('g.logEntry').data(log);
+
+    selection.select('text').selectAll('tspan').data(function(e) { return logEntryLabel(e.entry); }) // UPDATE
+        .text(function(txt) { return txt; });
+
+    selection.exit().remove(); // EXIT
+
+    var t = d3.transition().duration(500);
+
+    var enter = selection.enter();
+
+    var group = enter.append('g') // ENTER
+        .attr('class', function(d) { return 'logEntry from-transaction-' + d.transactionId; })
+        .attr('width', transactionLeft)
+        .attr('height', entryHeight)
+        .attr('transform', 'translate(0, 1000)');
+
+    group.transition(t)
+        .attr('transform', function(_, i) { return 'translate(0, '+ (i * entryHeight) +')'; });
+
+    group.append('rect')
+        .attr('x', logLeft)
+        .attr('width', entryWidth)
+        .attr('height', entryHeight)
+        .attr('class', function(e) { return e.entry.type; })
+        .classed('speculative', function(e) { return e.entry.speculative; })
+        .classed('checkpoint', function(e) { return e.entry.checkpoint; });
+
+    group.append('text')
+      .selectAll('tspan').data(function(e) { return logEntryLabel(e.entry); }).enter().append('tspan')
+        .attr('dy', 20)
+        .attr('x', logLeft + 5)
+        .text(function(txt) { return txt; });
+
+    // TODO: Visually render write set somehow.
+
+    renderRegisters(group, t);
+}
+
+// transactions = { '1': {writes: [{position: 3, registers: [...], status: 'committed'}], readSet: [...]}, ...], '2': [...], ... }
+// The position is the latest conflict region.  So, it will either correspond to the maximum element
+// in the read set for read-only transactions, or the write just performed by this transaction.
+// There can be multiple records with the same position, e.g. when an newer record is read then
+// an older record.
+function renderTransactions(transactions) {
+    var transactionIds = d3.keys(transactions).sort(d3.ascending); // Note: still sorting strings...
+
+    var selection = transactionsGraphic.selectAll('g.transaction').data(transactionIds);
+
+    var minPosition = function(tx) {
+        var writesMin = d3.min(tx.writes.map(function(w) { return w.position; }));
+        var readsMin = d3.min(tx.readSet);
+        if(writesMin === undefined) return readsMin;
+        if(readsMin === undefined) return writesMin;
+        return Math.min(writesMin, readsMin);
+    };
+
+    var maxPosition = function(tx) {
+        var writesMax = d3.max(tx.writes.map(function(w) { return w.position; }));
+        var readsMax = d3.max(tx.readSet);
+        if(writesMax === undefined) return readsMax;
+        if(readsMax === undefined) return writesMax;
+        return Math.max(writesMax, readsMax);
+    };
+
+    selection.select('line.timeline') // UPDATE
+       .transition(t)
+        .attr('y1', function(id) { return entryHeight * minPosition(transactions[id]); })
+        .attr('y2', function(id) { return entryHeight * (1 + maxPosition(transactions[id])); });
+
+    selection.exit().remove(); // EXIT
+
+    var t = d3.transition().duration(500);
+
+    var enter = selection.enter();
+
+    var group = enter.append('g') // ENTER
+        .attr('class', 'transaction')
+        .attr('width', transactionWidth)
+        .attr('transform', function(_, i) { return 'translate(' + (i*transactionWidth) + ', 0)'; });
+
+    group.append('line')
+        .attr('class', 'timeline')
+        .attr('style', function(id) { return 'stroke: ' + transactionColors[id]; })
+        .attr('x1', 0)
+        .attr('x2', 0)
+        .attr('y1', function(id) { return entryHeight * minPosition(transactions[id]); })
+        .attr('y2', function(id) { return entryHeight * minPosition(transactions[id]); })
+       .transition(t)
+        .attr('y2', function(id) { return entryHeight * (1 + maxPosition(transactions[id])); });
+
+    var subgroup = selection.merge(group).selectAll('g').data(function(id) { return transactions[id].writes; }).enter().append('g')
+        .attr('transform', function(e) { return 'translate(0, '+ (e.position * entryHeight) +')'; });
+
+    var t2 = t.transition().duration(500);
+
+    var getReadSet = function(id) {
+        return transactions[id].readSet.map(function(pos) { return { pos: pos, txIx: parseInt(id, 10) }; });
+    };
+
+    var arrowSelection = group.merge(selection).selectAll('line.read-set-arrow').data(getReadSet);
+    arrowSelection
+        .attr('x1', 0)
+        .attr('y1', function(d) { return d.pos*entryHeight + regHeight + 9 + d.txIx*9; })
+        .attr('y2', function(d) { return d.pos*entryHeight + regHeight + 9 + d.txIx*9; })
+      .transition(t2)
+        .attr('x2', function(d) { return -3 - (d.txIx-1)*transactionWidth; });
+
+    arrowSelection.enter().append('line')
+        .attr('class', 'read-set-arrow')
+        .attr('style', function(d) { return 'stroke: ' + transactionColors[d.txIx]; })
+        .attr('marker-end', function(d) { return 'url(#end-'+d.txIx+')'; })
+        .attr('x1', 0)
+        .attr('x2', 0)
+        .attr('y1', function(d) { return d.pos*entryHeight + regHeight + 9 + d.txIx*9; })
+        .attr('y2', function(d) { return d.pos*entryHeight + regHeight + 9 + d.txIx*9; })
+      .transition(t2)
+        .attr('x2', function(d) { return -3 - (d.txIx-1)*transactionWidth; });
+
+    subgroup.append('line')
+        .attr('class', function(tx) { return 'commit-line ' + tx.status; })
+        .attr('y1', entryHeight)
+        .attr('y2', entryHeight)
+      .transition(t2)
+        .attr('x1',-5)
+        .attr('x2',5);
+
+    renderRegisters(subgroup, t);
+}
+
+function renderSteps(steps, stepIndex) {
+    var selection = stepsGraphic.selectAll('text').data(steps);
+
+    selection // UPDATE
+        .text(function(txt) { return txt; });
+
+    selection.exit().remove(); // EXIT
+
+    var t = d3.transition().duration(500);
+
+    var enter = selection.enter();
+
+    enter.append('text')
+        .attr('x', 5)
+        .attr('y', function(_, ix) { return (ix+1)*regHeight - 10; })
+        .text(function(txt) { return txt; });
+
+    stepsGraphic.select('rect')
+        .attr('height', regHeight)
+        .attr('width', stepsWidth-1)
+      .transition(t)
+        .attr('y', stepIndex * regHeight);
+}
+
+var stepIndex = 0;
+var onData_transactions = {};
+var stepsString = '';
+
+// d = [{ steps: ['foo', ...], state: { log: [...], transactions: {...} } }, ...]
+function onData(d) {
+    var x = d[0];
+    if(x) {
+        // TODO: There is only at most one transaction in x.state.transactions right now.
+        for(var txId in x.state.transactions) {
+            onData_transactions[txId] = onData_transactions[txId] || {};
+            onData_transactions[txId].writes = onData_transactions[txId].writes || [];
+
+            if(x.state.transactions[txId].write) {
+                onData_transactions[txId].writes.push(x.state.transactions[txId].write);
+                x.state.log[x.state.log.length - 1].transactionId = txId; // HACK: A bit hacky.
+            }
+            onData_transactions[txId].readSet = x.state.transactions[txId].readSet;
+        }
+
+        stepsString = x.steps.join('\n');
+        d3.select('#editor-text').property('value', stepsString);
+
+        renderSteps(x.steps, ++stepIndex);
+        renderLog(x.state.log);
+        renderTransactions(onData_transactions);
+    }
+}
+
+var presets = {
+    '1': { title: 'Interleave Trace', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n1: read r2\n2: read r1\n2: read r2\n1: r1 := -100\n1: r2 := 100\n2: r1 := -333\n2: r2 := 333\n1: commit\n2: commit" },
+    '2': { title: 'Write-only transaction', steps: "1: r1 := 11\n1: r2 := 22\n*: r1 := 33\n1: commit" },
+    '3': { title: 'Aborted Transaction Overlaps Read Set', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n2: read r2\n*: r2 := 22\n2: r1 := 33\n2: commit\n1: r1 := 66\n1: commit" },
+    '4': { title: 'Aborted Transfer From r1 To r2', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n1: read r2\n*: r1 := 50\n1: r1 := -100\n1: r2 := 100\n1: commit" },
+    '5': { title: 'Accepted Write After Transaction Start', steps: "*: r1 := 0\n1: read r1\n*: r2 := 10\n1: read r2\n1: commit" },
+    '6': { title: 'Committed Transaction Overlaps Read Set', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n2: read r2\n2: r1 := 33\n2: commit\n1: r1 := 66\n1: commit" },
+    '7': { title: 'Post-increment', steps: "1: r1 := 100\n1: read r1\n*: read r1\n1: commit\n*: read r1" },
+    '8': { title: 'Out of Date State When Doing Commit Validation in a Transaction', steps: "*: r1 := 0\n*: r2 := 0\n*: r3 := 0\n1: read r1\n2: read r3\n*: r3 := 22\n2: r2 := 33\n2: commit\n1: read r2\n1: commit" },
+    '9': { title: 'Read-only Transaction', steps: "*: r1 := 0\n1: read r1\n*: r2 := 11\n1: read r2\n*: r2 := 22\n1: commit" },
+    '0': { title: 'Read-only Transaction Reading Another Transaction', steps: "*: r1 := 0\n1: read r1\n2: r2 := 11\n2: commit\n1: read r2\n*: r2 := 22\n1: commit" },
+    'a': { title: 'Successful Transfer From r1 To r2', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n1: read r2\n1: r1 := -100\n1: r2 := 100\n1: commit" },
+    'b': { title: 'Successful Transfer From r1 To r2 with Read in the Middle', steps: "*: r1 := 0\n*: r2 := 0\n1: read r1\n1: read r2\n1: r1 := -100\n1: r2 := 100\n*: read r1\n*: read r2\n1: commit" }
+};
+
+d3.select('body').on('keydown', function() { 
+    var key = d3.event.key;
+    if(d3.select('#editor').style('display') === 'none') {
+        switch(d3.event.key) {
+            case 'e': // bring up editor
+                d3.select('#editor').style('display', 'block');
+                d3.select('#container').style('display', 'none');
+                break;
+            case 'ArrowUp': // Back up
+                var previousStepIndex = Math.max(0, stepIndex - 2);
+                stepIndex = 0;
+                onData_transactions = {};
+                renderLog([]);
+                renderTransactions([]);
+                haskell.parseSteps(stepsString);
+                for(var i = 0; i < previousStepIndex; ++i) {
+                    haskell.advance();
+                }
+                d3.event.preventDefault();
+                break;
+            case 'ArrowDown': // Advance
+            case 'Enter': // Advance
+                haskell.advance(); 
+                d3.event.preventDefault();
+                break;
+            case 'h': // Help
+                alert("Enter advances.\n'e' brings up an editor, Esc dismisses it.\n'l' will load the contents of the editor.\n'r' will reset to the last successfully loaded steps.");
+                break;
+            case 'r': // reset
+                stepIndex = 0;
+                onData_transactions = {};
+                renderLog([]);
+                renderTransactions([]);
+                haskell.parseSteps(stepsString);
+                break;
+            case 'l': // load content from editor
+                stepIndex = 0;
+                onData_transactions = {};
+                renderLog([]);
+                renderTransactions([]);
+                d3.select('#title-text').text('');
+                haskell.parseSteps(d3.select('#editor-text').property('value'));
+                break;
+            default:
+                if(presets[d3.event.key]) {
+                    stepIndex = 0;
+                    onData_transactions = {};
+                    renderLog([]);
+                    renderTransactions([]);
+                    d3.select('#title-text').text(presets[d3.event.key].title);
+                    haskell.parseSteps(presets[d3.event.key].steps);
+                    break;
+                }
+        } 
+    } else {
+        switch(d3.event.key) {
+            case 'Escape': // dismiss editor
+                d3.select('#editor').style('display', 'none');
+                d3.select('#container').style('display', 'block');
+                break;
+        } 
+    }
+});
+
+window.setTimeout(function() { haskell.advance(); }, 0);
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+Write,1,1,100
+Read,1,1,100
+Read,,1,0
+Commit,1,,True
+Read,,1,100
